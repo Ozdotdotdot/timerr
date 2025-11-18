@@ -4,6 +4,8 @@ A Rust rewrite of the original Python countdown timer. The CLI renders large ASC
 
 The legacy Python sources are still available in `python base/` for reference, but the Rust implementation in `timer-rs/` is now the primary entry point.
 
+![Screenshot of the timer CLI showing a countdown rendered in block font](media/Screenshot_2025-11-18_11-17-15.png)
+
 ## Inspiration
 
 This rewrite builds on the original [timer-cli by 1Blademaster](https://github.com/1Blademaster/timer-cli), shared under the Apache-2.0 license. Huge thanks to them for the initial concept and Python implementation.
