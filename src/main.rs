@@ -86,7 +86,7 @@ fn parse_color(value: &str) -> std::result::Result<Color, String> {
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "timer",
+    name = "timerr",
     version,
     about = "A terminal countdown timer with ASCII art output."
 )]
@@ -114,12 +114,12 @@ struct Cli {
 
     /// Colour used during the first phase of the countdown
     #[arg(
-        long = "start-color",
+        long = "color",
         default_value = "#785c9c",
         value_parser = parse_color,
         help = "Colour for the initial countdown phase (pink|purple|green|blue|yellow|white|black|#RRGGBB)"
     )]
-    start_color: Color,
+    color: Color,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -167,7 +167,7 @@ fn main() -> Result<()> {
         cli.message.trim(),
         cli.no_bell,
         cli.font.definition(),
-        cli.start_color,
+        cli.color,
         cancel_flag,
     )?;
 
@@ -215,7 +215,7 @@ fn run_timer(
     message: &str,
     no_bell: bool,
     font: &FontDefinition,
-    start_color: Color,
+    color: Color,
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<()> {
     let total_secs = cmp::max(duration.as_secs(), 1);
@@ -244,9 +244,9 @@ fn run_timer(
         last_rendered = Some(remaining_secs);
         let time_string = format_time(remaining_secs);
         let ratio = remaining_secs as f64 / total_secs as f64;
-        let color = pick_color(ratio, start_color);
+        let timer_color = pick_color(ratio, color);
 
-        let lines = build_display(font, &time_string, message, color);
+        let lines = build_display(font, &time_string, message, timer_color);
         terminal.render(&lines, None)?;
 
         thread::sleep(Duration::from_millis(150));
@@ -280,9 +280,9 @@ fn format_time(total_seconds: u64) -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
-fn pick_color(ratio_remaining: f64, start_color: Color) -> Color {
+fn pick_color(ratio_remaining: f64, base_color: Color) -> Color {
     if ratio_remaining > TEXT_COLOUR_HIGH_PERCENT {
-        start_color
+        base_color
     } else if ratio_remaining > TEXT_COLOUR_LOW_PERCENT {
         Color::Yellow
     } else {

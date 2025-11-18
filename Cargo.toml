@@ -1,7 +1,11 @@
 [package]
-name = "timer-rs"
+name = "timerr-cli"
 version = "0.1.0"
 edition = "2024"
+
+[[bin]]
+name = "timerr"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
