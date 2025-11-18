@@ -339,55 +339,42 @@ impl TerminalRenderer {
         let width = cols.max(1) as usize;
         let mut writer = &self.stdout;
 
-        writer.execute(MoveTo(0, 0))?;
-
         if let Some(bg) = background {
-            writer.execute(SetBackgroundColor(bg))?;
+            let fill = " ".repeat(width);
+            for row in 0..rows {
+                writer.execute(MoveTo(0, row))?;
+                writer.execute(SetBackgroundColor(bg))?;
+                write!(writer, "{fill}")?;
+            }
+            writer.execute(ResetColor)?;
         }
 
         let total_lines = lines.len() as u16;
-        let vertical_padding = rows.saturating_sub(total_lines) / 2;
-        let blank_line = " ".repeat(width);
+        let start_row = rows.saturating_sub(total_lines) / 2;
 
-        for _ in 0..vertical_padding {
-            writer.execute(ResetColor)?;
-            if let Some(bg) = background {
-                writer.execute(SetBackgroundColor(bg))?;
-            }
-            writeln!(writer, "{blank_line}")?;
-        }
-
-        for (line, color) in lines {
+        for (idx, (line, color)) in lines.iter().enumerate() {
             let truncated = truncate_to_width(line, width);
             let text_width = UnicodeWidthStr::width(truncated.as_str());
-            let horizontal_padding = width.saturating_sub(text_width) / 2;
-            let right_padding = width.saturating_sub(horizontal_padding + text_width);
+            let left_padding = width.saturating_sub(text_width) / 2;
+            let right_padding = width.saturating_sub(left_padding + text_width);
+            let target_row = start_row + idx as u16;
 
+            writer.execute(MoveTo(0, target_row))?;
             writer.execute(ResetColor)?;
             if let Some(bg) = background {
                 writer.execute(SetBackgroundColor(bg))?;
             }
-            write!(writer, "{}", " ".repeat(horizontal_padding))?;
-
-            if let Some(color) = color {
-                writer.execute(SetForegroundColor(*color))?;
+            if let Some(fg) = color {
+                writer.execute(SetForegroundColor(*fg))?;
             }
 
-            write!(writer, "{truncated}")?;
-            writer.execute(ResetColor)?;
-            if let Some(bg) = background {
-                writer.execute(SetBackgroundColor(bg))?;
-            }
-            writeln!(writer, "{}", " ".repeat(right_padding))?;
-        }
-
-        let bottom_padding = rows.saturating_sub(vertical_padding + total_lines);
-        for _ in 0..bottom_padding {
-            writer.execute(ResetColor)?;
-            if let Some(bg) = background {
-                writer.execute(SetBackgroundColor(bg))?;
-            }
-            writeln!(writer, "{blank_line}")?;
+            write!(
+                writer,
+                "{}{}{}",
+                " ".repeat(left_padding),
+                truncated,
+                " ".repeat(right_padding)
+            )?;
         }
 
         writer.execute(ResetColor)?;
