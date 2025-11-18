@@ -320,7 +320,6 @@ fn ring_bell() {
 
 struct TerminalRenderer {
     stdout: Stdout,
-    last_size: Option<(u16, u16)>,
 }
 
 impl TerminalRenderer {
@@ -328,10 +327,7 @@ impl TerminalRenderer {
         let mut stdout = stdout();
         stdout.execute(EnterAlternateScreen)?;
         stdout.execute(Hide)?;
-        Ok(Self {
-            stdout,
-            last_size: None,
-        })
+        Ok(Self { stdout })
     }
 
     fn render(
@@ -343,17 +339,10 @@ impl TerminalRenderer {
         let width = cols.max(1) as usize;
         let mut writer = &self.stdout;
 
-        let current_size = (cols, rows);
-        if self.last_size != Some(current_size) {
-            writer.execute(Clear(ClearType::All))?;
-            self.last_size = Some(current_size);
-        }
-
-        let total_lines = lines.len() as u16;
-        let start_row = rows.saturating_sub(total_lines) / 2;
+        writer.execute(Clear(ClearType::All))?;
         let blank_line = " ".repeat(width);
 
-        for row in 0..start_row {
+        for row in 0..rows {
             writer.execute(MoveTo(0, row))?;
             writer.execute(ResetColor)?;
             if let Some(bg) = background {
@@ -361,6 +350,9 @@ impl TerminalRenderer {
             }
             write!(writer, "{blank_line}")?;
         }
+
+        let total_lines = lines.len() as u16;
+        let start_row = rows.saturating_sub(total_lines) / 2;
 
         for (idx, (line, color)) in lines.iter().enumerate() {
             let truncated = truncate_to_width(line, width);
@@ -385,16 +377,6 @@ impl TerminalRenderer {
                 truncated,
                 " ".repeat(right_padding)
             )?;
-        }
-
-        let end_row = start_row + total_lines;
-        for row in end_row..rows {
-            writer.execute(MoveTo(0, row))?;
-            writer.execute(ResetColor)?;
-            if let Some(bg) = background {
-                writer.execute(SetBackgroundColor(bg))?;
-            }
-            write!(writer, "{blank_line}")?;
         }
 
         writer.execute(ResetColor)?;
