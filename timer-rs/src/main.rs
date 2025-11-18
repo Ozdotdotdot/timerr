@@ -13,7 +13,7 @@ use crossterm::{
     ExecutableCommand,
     cursor::{Hide, MoveTo, Show},
     style::{Color, ResetColor, SetBackgroundColor, SetForegroundColor},
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use regex::Regex;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -320,6 +320,7 @@ fn ring_bell() {
 
 struct TerminalRenderer {
     stdout: Stdout,
+    last_size: Option<(u16, u16)>,
 }
 
 impl TerminalRenderer {
@@ -327,7 +328,10 @@ impl TerminalRenderer {
         let mut stdout = stdout();
         stdout.execute(EnterAlternateScreen)?;
         stdout.execute(Hide)?;
-        Ok(Self { stdout })
+        Ok(Self {
+            stdout,
+            last_size: None,
+        })
     }
 
     fn render(
@@ -339,18 +343,24 @@ impl TerminalRenderer {
         let width = cols.max(1) as usize;
         let mut writer = &self.stdout;
 
-        if let Some(bg) = background {
-            let fill = " ".repeat(width);
-            for row in 0..rows {
-                writer.execute(MoveTo(0, row))?;
-                writer.execute(SetBackgroundColor(bg))?;
-                write!(writer, "{fill}")?;
-            }
-            writer.execute(ResetColor)?;
+        let current_size = (cols, rows);
+        if self.last_size != Some(current_size) {
+            writer.execute(Clear(ClearType::All))?;
+            self.last_size = Some(current_size);
         }
 
         let total_lines = lines.len() as u16;
         let start_row = rows.saturating_sub(total_lines) / 2;
+        let blank_line = " ".repeat(width);
+
+        for row in 0..start_row {
+            writer.execute(MoveTo(0, row))?;
+            writer.execute(ResetColor)?;
+            if let Some(bg) = background {
+                writer.execute(SetBackgroundColor(bg))?;
+            }
+            write!(writer, "{blank_line}")?;
+        }
 
         for (idx, (line, color)) in lines.iter().enumerate() {
             let truncated = truncate_to_width(line, width);
@@ -375,6 +385,16 @@ impl TerminalRenderer {
                 truncated,
                 " ".repeat(right_padding)
             )?;
+        }
+
+        let end_row = start_row + total_lines;
+        for row in end_row..rows {
+            writer.execute(MoveTo(0, row))?;
+            writer.execute(ResetColor)?;
+            if let Some(bg) = background {
+                writer.execute(SetBackgroundColor(bg))?;
+            }
+            write!(writer, "{blank_line}")?;
         }
 
         writer.execute(ResetColor)?;
