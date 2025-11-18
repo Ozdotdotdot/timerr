@@ -8,10 +8,11 @@ use clap::{Parser, ValueEnum};
 use crossterm::{
     ExecutableCommand,
     cursor::{Hide, MoveTo, Show},
-    style::{Color, ResetColor, SetForegroundColor},
+    style::{Color, ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use regex::Regex;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const TEXT_COLOUR_HIGH_PERCENT: f64 = 0.5;
 const TEXT_COLOUR_LOW_PERCENT: f64 = 0.2;
@@ -50,14 +51,16 @@ struct Cli {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum FontChoice {
     Classic,
-    Blocky,
+    Hashy,
+    Solid,
 }
 
 impl FontChoice {
     fn definition(self) -> &'static FontDefinition {
         match self {
             FontChoice::Classic => &CLASSIC_FONT,
-            FontChoice::Blocky => &BLOCKY_FONT,
+            FontChoice::Hashy => &HASHY_FONT,
+            FontChoice::Solid => &SOLID_FONT,
         }
     }
 }
@@ -153,19 +156,22 @@ fn run_timer(
         let color = pick_color(ratio);
 
         let lines = build_display(font, &time_string, message, color);
-        terminal.render(&lines)?;
+        terminal.render(&lines, None)?;
 
         thread::sleep(Duration::from_millis(150));
     }
 
     // Final state
-    let final_lines = build_display(font, "00:00:00", message, Color::DarkRed);
-    terminal.render(&final_lines)?;
+    let final_lines = build_display(font, "00:00:00", message, Color::White);
+    terminal.render(&final_lines, Some(Color::DarkRed))?;
+
+    if !no_bell {
+        ring_bell();
+    }
 
     loop {
         if !no_bell {
-            print!("\x07");
-            std::io::stdout().flush().ok();
+            ring_bell();
         }
         thread::sleep(Duration::from_secs(10));
     }
@@ -201,19 +207,29 @@ fn build_display(
         .map(|line| (line, Some(timer_color)))
         .collect();
 
-    let timer_width = lines.iter().map(|(line, _)| line.len()).max().unwrap_or(0);
+    let timer_width = lines
+        .iter()
+        .map(|(line, _)| UnicodeWidthStr::width(line.as_str()))
+        .max()
+        .unwrap_or(0);
 
     if !message.trim().is_empty() {
         lines.push(("".into(), None));
         for raw_line in message.lines() {
             let trimmed = raw_line.trim_end();
-            let padding = timer_width.saturating_sub(trimmed.len()) / 2;
+            let line_width = UnicodeWidthStr::width(trimmed);
+            let padding = timer_width.saturating_sub(line_width) / 2;
             let centered = format!("{}{}", " ".repeat(padding), trimmed);
             lines.push((centered, Some(Color::Cyan)));
         }
     }
 
     lines
+}
+
+fn ring_bell() {
+    print!("\x07");
+    let _ = stdout().flush();
 }
 
 struct TerminalRenderer {
@@ -228,35 +244,70 @@ impl TerminalRenderer {
         Ok(Self { stdout })
     }
 
-    fn render(&mut self, lines: &[(String, Option<Color>)]) -> TerminalResult<()> {
+    fn render(
+        &mut self,
+        lines: &[(String, Option<Color>)],
+        background: Option<Color>,
+    ) -> TerminalResult<()> {
         let (cols, rows) = terminal::size()?;
+        let width = cols.max(1) as usize;
         let mut writer = &self.stdout;
 
         writer.execute(Clear(ClearType::All))?;
         writer.execute(MoveTo(0, 0))?;
 
+        if let Some(bg) = background {
+            writer.execute(SetBackgroundColor(bg))?;
+        }
+
         let total_lines = lines.len() as u16;
         let vertical_padding = rows.saturating_sub(total_lines) / 2;
+        let blank_line = " ".repeat(width);
 
         for _ in 0..vertical_padding {
-            writeln!(writer)?;
+            if background.is_some() {
+                writeln!(writer, "{blank_line}")?;
+            } else {
+                writeln!(writer)?;
+            }
         }
 
         for (line, color) in lines {
-            let line_width = line.len() as u16;
-            let horizontal_padding = if cols > line_width {
-                ((cols - line_width) / 2) as usize
+            let truncated = truncate_to_width(line, width);
+            let text_width = UnicodeWidthStr::width(truncated.as_str()) as u16;
+            let horizontal_padding = if cols > text_width {
+                ((cols - text_width) / 2) as usize
             } else {
                 0
             };
+
+            let mut row = String::new();
+            row.push_str(&" ".repeat(horizontal_padding));
+            row.push_str(&truncated);
+            let current_width = UnicodeWidthStr::width(row.as_str()).min(width);
+            if background.is_some() && current_width < width {
+                row.push_str(&" ".repeat(width - current_width));
+            }
 
             if let Some(color) = color {
                 writer.execute(SetForegroundColor(*color))?;
             } else {
                 writer.execute(ResetColor)?;
+                if let Some(bg) = background {
+                    writer.execute(SetBackgroundColor(bg))?;
+                }
             }
 
-            writeln!(writer, "{}{}", " ".repeat(horizontal_padding), line)?;
+            writeln!(writer, "{row}")?;
+        }
+
+        let bottom_padding = rows.saturating_sub(vertical_padding + total_lines);
+        for _ in 0..bottom_padding {
+            if background.is_some() {
+                writeln!(writer, "{blank_line}")?;
+            } else {
+                writeln!(writer)?;
+            }
         }
 
         writer.execute(ResetColor)?;
@@ -276,6 +327,7 @@ impl Drop for TerminalRenderer {
 struct FontDefinition {
     height: usize,
     spacing: usize,
+    glyph_width: usize,
     glyphs: &'static [Glyph],
 }
 
@@ -291,7 +343,8 @@ impl FontDefinition {
             let glyph_lines = self.find_lines(*ch);
 
             for (line_idx, glyph_line) in glyph_lines.iter().enumerate() {
-                lines[line_idx].push_str(glyph_line);
+                let padded = pad_to_width(glyph_line, self.glyph_width);
+                lines[line_idx].push_str(&padded);
             }
 
             if idx + 1 != chars.len() {
@@ -319,6 +372,34 @@ impl FontDefinition {
     }
 }
 
+fn truncate_to_width(input: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let mut current = 0;
+    let mut output = String::new();
+    for ch in input.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current + ch_width > width {
+            break;
+        }
+        output.push(ch);
+        current += ch_width;
+    }
+
+    output
+}
+
+fn pad_to_width(input: &str, width: usize) -> String {
+    let mut truncated = truncate_to_width(input, width);
+    let current_width = UnicodeWidthStr::width(truncated.as_str());
+    if current_width < width {
+        truncated.push_str(&" ".repeat(width - current_width));
+    }
+    truncated
+}
+
 struct Glyph {
     ch: char,
     lines: &'static [&'static str],
@@ -327,6 +408,7 @@ struct Glyph {
 const CLASSIC_FONT: FontDefinition = FontDefinition {
     height: 5,
     spacing: 2,
+    glyph_width: 7,
     glyphs: &CLASSIC_GLYPHS,
 };
 
@@ -381,13 +463,14 @@ const CLASSIC_GLYPHS: [Glyph; 12] = [
     },
 ];
 
-const BLOCKY_FONT: FontDefinition = FontDefinition {
+const HASHY_FONT: FontDefinition = FontDefinition {
     height: 6,
     spacing: 1,
-    glyphs: &BLOCKY_GLYPHS,
+    glyph_width: 8,
+    glyphs: &HASHY_GLYPHS,
 };
 
-const BLOCKY_GLYPHS: [Glyph; 12] = [
+const HASHY_GLYPHS: [Glyph; 12] = [
     Glyph {
         ch: '0',
         lines: &[
@@ -455,5 +538,145 @@ const BLOCKY_GLYPHS: [Glyph; 12] = [
     Glyph {
         ch: ' ',
         lines: &["  ", "  ", "  ", "  ", "  ", "  "],
+    },
+];
+
+const SOLID_FONT: FontDefinition = FontDefinition {
+    height: 7,
+    spacing: 1,
+    glyph_width: 7,
+    glyphs: &SOLID_GLYPHS,
+};
+
+const SOLID_GLYPHS: [Glyph; 12] = [
+    Glyph {
+        ch: '0',
+        lines: &[
+            " █████ ",
+            "██   ██",
+            "██   ██",
+            "██   ██",
+            "██   ██",
+            "██   ██",
+            " █████ ",
+        ],
+    },
+    Glyph {
+        ch: '1',
+        lines: &[
+            "   ██  ",
+            " ████  ",
+            "   ██  ",
+            "   ██  ",
+            "   ██  ",
+            "   ██  ",
+            " █████ ",
+        ],
+    },
+    Glyph {
+        ch: '2',
+        lines: &[
+            " █████ ",
+            "██   ██",
+            "    ██ ",
+            "  ███  ",
+            " ██    ",
+            "██     ",
+            "███████",
+        ],
+    },
+    Glyph {
+        ch: '3',
+        lines: &[
+            " █████ ",
+            "██   ██",
+            "    ██ ",
+            "  ███  ",
+            "    ██ ",
+            "██   ██",
+            " █████ ",
+        ],
+    },
+    Glyph {
+        ch: '4',
+        lines: &[
+            "██   ██",
+            "██   ██",
+            "██   ██",
+            "███████",
+            "     ██",
+            "     ██",
+            "     ██",
+        ],
+    },
+    Glyph {
+        ch: '5',
+        lines: &[
+            "███████",
+            "██     ",
+            "██████ ",
+            "     ██",
+            "     ██",
+            "██   ██",
+            " █████ ",
+        ],
+    },
+    Glyph {
+        ch: '6',
+        lines: &[
+            "  ████ ",
+            " ██    ",
+            "██     ",
+            "██████ ",
+            "██   ██",
+            "██   ██",
+            " █████ ",
+        ],
+    },
+    Glyph {
+        ch: '7',
+        lines: &[
+            "███████",
+            "     ██",
+            "    ██ ",
+            "   ██  ",
+            "  ██   ",
+            " ██    ",
+            " ██    ",
+        ],
+    },
+    Glyph {
+        ch: '8',
+        lines: &[
+            " █████ ",
+            "██   ██",
+            "██   ██",
+            " █████ ",
+            "██   ██",
+            "██   ██",
+            " █████ ",
+        ],
+    },
+    Glyph {
+        ch: '9',
+        lines: &[
+            " █████ ",
+            "██   ██",
+            "██   ██",
+            " ██████",
+            "     ██",
+            "    ██ ",
+            " ████  ",
+        ],
+    },
+    Glyph {
+        ch: ':',
+        lines: &["   ", " ██", " ██", "   ", " ██", " ██", "   "],
+    },
+    Glyph {
+        ch: ' ',
+        lines: &[
+            "       ", "       ", "       ", "       ", "       ", "       ", "       ",
+        ],
     },
 ];
