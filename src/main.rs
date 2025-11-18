@@ -23,6 +23,63 @@ const TEXT_COLOUR_LOW_PERCENT: f64 = 0.2;
 
 type TerminalResult<T> = std::io::Result<T>;
 
+fn parse_color(value: &str) -> std::result::Result<Color, String> {
+    let raw = value.trim();
+    if raw.is_empty() {
+        return Err("colour value cannot be empty".into());
+    }
+
+    let normalized = raw.to_ascii_lowercase();
+    let named = match normalized.as_str() {
+        "pink" => Some(Color::Rgb {
+            r: 0xcc,
+            g: 0x3d,
+            b: 0xd4,
+        }),
+        "cyan" => Some(Color::Rgb {
+            r: 0xa6,
+            g: 0x6e,
+            b: 0xeb,
+        }),
+        "green" => Some(Color::Rgb {
+            r: 0x24,
+            g: 0x8c,
+            b: 0x5f,
+        }),
+        "blue" => Some(Color::Rgb {
+            r: 0x06,
+            g: 0x0e,
+            b: 0xa1,
+        }),
+        "yellow" => Some(Color::Rgb {
+            r: 0xd9,
+            g: 0xed,
+            b: 0x77,
+        }),
+        "white" => Some(Color::White),
+        "black" => Some(Color::Black),
+        "default" => Some(Color::Green),
+        _ => None,
+    };
+
+    if let Some(color) = named {
+        return Ok(color);
+    }
+
+    let hex = raw.trim_start_matches('#');
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "Invalid colour '{raw}'. Use pink/cyan/green/blue or a #RRGGBB hex code."
+        ));
+    }
+
+    let r = u8::from_str_radix(&hex[0..2], 16).map_err(|_| "invalid red component")?;
+    let g = u8::from_str_radix(&hex[2..4], 16).map_err(|_| "invalid green component")?;
+    let b = u8::from_str_radix(&hex[4..6], 16).map_err(|_| "invalid blue component")?;
+
+    Ok(Color::Rgb { r, g, b })
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "timer",
@@ -50,6 +107,15 @@ struct Cli {
         default_value_t = FontChoice::Solid
     )]
     font: FontChoice,
+
+    /// Colour used during the first phase of the countdown
+    #[arg(
+        long = "start-color",
+        default_value = "green",
+        value_parser = parse_color,
+        help = "Colour for the initial countdown phase (pink|cyan|green|blue|#RRGGBB)"
+    )]
+    start_color: Color,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -97,6 +163,7 @@ fn main() -> Result<()> {
         cli.message.trim(),
         cli.no_bell,
         cli.font.definition(),
+        cli.start_color,
         cancel_flag,
     )?;
 
@@ -144,6 +211,7 @@ fn run_timer(
     message: &str,
     no_bell: bool,
     font: &FontDefinition,
+    start_color: Color,
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<()> {
     let total_secs = cmp::max(duration.as_secs(), 1);
@@ -172,7 +240,7 @@ fn run_timer(
         last_rendered = Some(remaining_secs);
         let time_string = format_time(remaining_secs);
         let ratio = remaining_secs as f64 / total_secs as f64;
-        let color = pick_color(ratio);
+        let color = pick_color(ratio, start_color);
 
         let lines = build_display(font, &time_string, message, color);
         terminal.render(&lines, None)?;
@@ -208,9 +276,9 @@ fn format_time(total_seconds: u64) -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
-fn pick_color(ratio_remaining: f64) -> Color {
+fn pick_color(ratio_remaining: f64, start_color: Color) -> Color {
     if ratio_remaining > TEXT_COLOUR_HIGH_PERCENT {
-        Color::Green
+        start_color
     } else if ratio_remaining > TEXT_COLOUR_LOW_PERCENT {
         Color::Yellow
     } else {
@@ -468,7 +536,7 @@ const CLASSIC_GLYPHS: [Glyph; 12] = [
     Glyph {
         ch: '8',
         lines: &[
-            "  ___  ", " ( _ ) ", " / _ \\ ", "| (_) |", "| (_) |", " \\___/ ",
+            "  ___  ", " / _ \\ ", "| (_) |", "|  _  |", "| (_) |", " \\___/ ",
         ],
     },
     Glyph {
