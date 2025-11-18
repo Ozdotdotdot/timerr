@@ -1,0 +1,43 @@
+# Timer-CLI (Rust)
+
+A Rust rewrite of the original Python countdown timer. The CLI renders large ASCII art digits in the center of the terminal, supports optional messages, and now lets you switch between a "classic" font and a blockier, high-contrast style for easier reading on translucent terminals.
+
+The legacy Python sources are still available in `python base/` for reference, but the Rust implementation in `timer-rs/` is now the primary entry point.
+
+## Inspiration
+
+This rewrite builds on the original [timer-cli by 1Blademaster](https://github.com/1Blademaster/timer-cli), shared under the Apache-2.0 license. Huge thanks to them for the initial concept and Python implementation.
+
+## Installation
+
+```bash
+cargo install timerr-cli
+# or from the cloned repo
+cargo install --path timer-rs .
+# run directly during development
+cargo run --bin timerr -- <duration> [flags]
+```
+
+## Usage
+
+```bash
+timerr <duration> [OPTIONS]
+```
+
+- Duration syntax matches the Python tool: `__h__m__s`, e.g. `25m`, `1h30m`, `5m30s`.
+- `-m, --message <TEXT>` – show a note centered under the timer.
+- `--no-bell` – suppress the repeating terminal bell after the timer ends.
+- `-f, --font <classic|hashy|solid>` – `solid` (the default) renders chunky block characters, `classic` uses those lovely standard characters on your keyboard, and `hashy` uses `#`-based glyphs. You can also set `TIMER_FONT` to switch fonts globally.
+- `--color <colour>` – choose the initial countdown colour. Accepted names: `pink`, `purple`, `green`, `blue`, `yellow`, `white`, `black`, or any `#RRGGBB` hex value (default `#785c9c`).
+
+The timer changes colours as it counts down (green → yellow → red), uses the terminal’s alternate screen buffer for clean rendering, and beeps every 10 seconds after completion until interrupted (`Ctrl+C`).
+
+## Examples
+
+```bash
+# 25 minutes with a label and the blocky font
+timerr 25m -m "Review pull requests" --font hashy
+
+# 1 hour, silence the bell
+timerr 1h --no-bell
+```
