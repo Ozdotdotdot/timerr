@@ -47,7 +47,7 @@ struct Cli {
         long = "font",
         value_enum,
         env = "TIMER_FONT",
-        default_value_t = FontChoice::Classic
+        default_value_t = FontChoice::Solid
     )]
     font: FontChoice,
 }
@@ -193,16 +193,10 @@ fn run_timer(
     }
 
     loop {
-        for _ in 0..10 {
-            if cancel_flag.load(Ordering::SeqCst) {
-                return Ok(());
-            }
-            thread::sleep(Duration::from_secs(1));
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Ok(());
         }
-
-        if !no_bell {
-            ring_bell();
-        }
+        thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -236,20 +230,11 @@ fn build_display(
         .map(|line| (line, Some(timer_color)))
         .collect();
 
-    let timer_width = lines
-        .iter()
-        .map(|(line, _)| UnicodeWidthStr::width(line.as_str()))
-        .max()
-        .unwrap_or(0);
-
     if !message.trim().is_empty() {
         lines.push(("".into(), None));
         for raw_line in message.lines() {
-            let trimmed = raw_line.trim_end();
-            let line_width = UnicodeWidthStr::width(trimmed);
-            let padding = timer_width.saturating_sub(line_width) / 2;
-            let centered = format!("{}{}", " ".repeat(padding), trimmed);
-            lines.push((centered, Some(Color::Cyan)));
+            let trimmed = raw_line.trim();
+            lines.push((trimmed.to_string(), Some(Color::Cyan)));
         }
     }
 
@@ -293,40 +278,43 @@ impl TerminalRenderer {
         let blank_line = " ".repeat(width);
 
         for _ in 0..vertical_padding {
+            writer.execute(ResetColor)?;
+            if let Some(bg) = background {
+                writer.execute(SetBackgroundColor(bg))?;
+            }
             writeln!(writer, "{blank_line}")?;
         }
 
         for (line, color) in lines {
             let truncated = truncate_to_width(line, width);
-            let text_width = UnicodeWidthStr::width(truncated.as_str()) as u16;
-            let horizontal_padding = if cols > text_width {
-                ((cols - text_width) / 2) as usize
-            } else {
-                0
-            };
+            let text_width = UnicodeWidthStr::width(truncated.as_str());
+            let horizontal_padding = width.saturating_sub(text_width) / 2;
+            let right_padding = width.saturating_sub(horizontal_padding + text_width);
 
-            let mut row = String::new();
-            row.push_str(&" ".repeat(horizontal_padding));
-            row.push_str(&truncated);
-            let current_width = UnicodeWidthStr::width(row.as_str());
-            if current_width < width {
-                row.push_str(&" ".repeat(width - current_width));
+            writer.execute(ResetColor)?;
+            if let Some(bg) = background {
+                writer.execute(SetBackgroundColor(bg))?;
             }
+            write!(writer, "{}", " ".repeat(horizontal_padding))?;
 
             if let Some(color) = color {
                 writer.execute(SetForegroundColor(*color))?;
-            } else {
-                writer.execute(ResetColor)?;
-                if let Some(bg) = background {
-                    writer.execute(SetBackgroundColor(bg))?;
-                }
             }
 
-            writeln!(writer, "{row}")?;
+            write!(writer, "{truncated}")?;
+            writer.execute(ResetColor)?;
+            if let Some(bg) = background {
+                writer.execute(SetBackgroundColor(bg))?;
+            }
+            writeln!(writer, "{}", " ".repeat(right_padding))?;
         }
 
         let bottom_padding = rows.saturating_sub(vertical_padding + total_lines);
         for _ in 0..bottom_padding {
+            writer.execute(ResetColor)?;
+            if let Some(bg) = background {
+                writer.execute(SetBackgroundColor(bg))?;
+            }
             writeln!(writer, "{blank_line}")?;
         }
 
