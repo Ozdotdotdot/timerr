@@ -1,5 +1,9 @@
 use std::cmp;
 use std::io::{Stdout, Write, stdout};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -9,7 +13,7 @@ use crossterm::{
     ExecutableCommand,
     cursor::{Hide, MoveTo, Show},
     style::{Color, ResetColor, SetBackgroundColor, SetForegroundColor},
-    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use regex::Regex;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -76,6 +80,15 @@ fn main() -> Result<()> {
 
     let duration = parse_duration(duration_input)?;
 
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let handler_flag = Arc::clone(&cancel_flag);
+        ctrlc::set_handler(move || {
+            handler_flag.store(true, Ordering::SeqCst);
+        })
+        .context("failed to install Ctrl+C handler")?;
+    }
+
     let mut terminal = TerminalRenderer::new().context("failed to prepare the terminal")?;
 
     run_timer(
@@ -84,6 +97,7 @@ fn main() -> Result<()> {
         cli.message.trim(),
         cli.no_bell,
         cli.font.definition(),
+        cancel_flag,
     )?;
 
     Ok(())
@@ -130,12 +144,17 @@ fn run_timer(
     message: &str,
     no_bell: bool,
     font: &FontDefinition,
+    cancel_flag: Arc<AtomicBool>,
 ) -> Result<()> {
     let total_secs = cmp::max(duration.as_secs(), 1);
     let start = Instant::now();
     let mut last_rendered = None;
 
     loop {
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
         let elapsed = start.elapsed();
 
         if elapsed >= duration {
@@ -165,15 +184,25 @@ fn run_timer(
     let final_lines = build_display(font, "00:00:00", message, Color::White);
     terminal.render(&final_lines, Some(Color::DarkRed))?;
 
+    if cancel_flag.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
     if !no_bell {
         ring_bell();
     }
 
     loop {
+        for _ in 0..10 {
+            if cancel_flag.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+
         if !no_bell {
             ring_bell();
         }
-        thread::sleep(Duration::from_secs(10));
     }
 }
 
@@ -253,7 +282,6 @@ impl TerminalRenderer {
         let width = cols.max(1) as usize;
         let mut writer = &self.stdout;
 
-        writer.execute(Clear(ClearType::All))?;
         writer.execute(MoveTo(0, 0))?;
 
         if let Some(bg) = background {
@@ -265,11 +293,7 @@ impl TerminalRenderer {
         let blank_line = " ".repeat(width);
 
         for _ in 0..vertical_padding {
-            if background.is_some() {
-                writeln!(writer, "{blank_line}")?;
-            } else {
-                writeln!(writer)?;
-            }
+            writeln!(writer, "{blank_line}")?;
         }
 
         for (line, color) in lines {
@@ -284,8 +308,8 @@ impl TerminalRenderer {
             let mut row = String::new();
             row.push_str(&" ".repeat(horizontal_padding));
             row.push_str(&truncated);
-            let current_width = UnicodeWidthStr::width(row.as_str()).min(width);
-            if background.is_some() && current_width < width {
+            let current_width = UnicodeWidthStr::width(row.as_str());
+            if current_width < width {
                 row.push_str(&" ".repeat(width - current_width));
             }
 
@@ -303,11 +327,7 @@ impl TerminalRenderer {
 
         let bottom_padding = rows.saturating_sub(vertical_padding + total_lines);
         for _ in 0..bottom_padding {
-            if background.is_some() {
-                writeln!(writer, "{blank_line}")?;
-            } else {
-                writeln!(writer)?;
-            }
+            writeln!(writer, "{blank_line}")?;
         }
 
         writer.execute(ResetColor)?;

@@ -9,3 +9,4 @@ clap = { version = "4.5", features = ["derive", "env"] }
 crossterm = "0.27"
 regex = "1.10"
 unicode-width = "0.1"
+ctrlc = "3.4"
