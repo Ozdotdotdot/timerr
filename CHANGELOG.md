@@ -1,5 +1,9 @@
 # Changelog
 
+## [v1.0.1] - 2025-11-18
+### Added
+- **Responsive Rendering**: Timer display now fully re-centers and redraws itself when the terminal window is resized, preventing ghosting or overlapping digits during rapid resize operations.
+
 ## [v1.0.0] - 2025-11-18
 ### Added
 - This is the first release of timerr, a Rust-based countdown timer CLI tool. Key features include:
