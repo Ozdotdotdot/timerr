@@ -36,7 +36,7 @@ fn parse_color(value: &str) -> std::result::Result<Color, String> {
             g: 0x3d,
             b: 0xd4,
         }),
-        "cyan" => Some(Color::Rgb {
+        "purple" => Some(Color::Rgb {
             r: 0xa6,
             g: 0x6e,
             b: 0xeb,
@@ -58,7 +58,11 @@ fn parse_color(value: &str) -> std::result::Result<Color, String> {
         }),
         "white" => Some(Color::White),
         "black" => Some(Color::Black),
-        "default" => Some(Color::Green),
+        "default" => Some(Color::Rgb {
+            r: 0x78,
+            g: 0x5c,
+            b: 0x9c,
+        }),
         _ => None,
     };
 
@@ -69,7 +73,7 @@ fn parse_color(value: &str) -> std::result::Result<Color, String> {
     let hex = raw.trim_start_matches('#');
     if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!(
-            "Invalid colour '{raw}'. Use pink/cyan/green/blue or a #RRGGBB hex code."
+            "Invalid colour '{raw}'. Use pink/cyan/green/blue/yellow/white/black or a #RRGGBB hex code."
         ));
     }
 
@@ -111,9 +115,9 @@ struct Cli {
     /// Colour used during the first phase of the countdown
     #[arg(
         long = "start-color",
-        default_value = "green",
+        default_value = "#785c9c",
         value_parser = parse_color,
-        help = "Colour for the initial countdown phase (pink|cyan|green|blue|#RRGGBB)"
+        help = "Colour for the initial countdown phase (pink|purple|green|blue|yellow|white|black|#RRGGBB)"
     )]
     start_color: Color,
 }
