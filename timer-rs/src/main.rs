@@ -120,6 +120,10 @@ struct Cli {
         help = "Colour for the initial countdown phase (pink|purple|green|blue|yellow|white|black|#RRGGBB)"
     )]
     color: Color,
+
+    /// Exit automatically when timer reaches zero (useful for scripts)
+    #[arg(long = "auto-end", default_value_t = false)]
+    auto_end: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -168,6 +172,7 @@ fn main() -> Result<()> {
         cli.no_bell,
         cli.font.definition(),
         cli.color,
+        cli.auto_end,
         cancel_flag,
     )?;
 
@@ -216,6 +221,7 @@ fn run_timer(
     no_bell: bool,
     font: &FontDefinition,
     color: Color,
+    auto_end: bool,
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<()> {
     let total_secs = cmp::max(duration.as_secs(), 1);
@@ -264,6 +270,13 @@ fn run_timer(
         ring_bell();
     }
 
+    // If auto-end is enabled, exit immediately after showing final state
+    if auto_end {
+        thread::sleep(Duration::from_millis(500)); // Brief pause to show final state
+        return Ok(());
+    }
+
+    // Otherwise, wait for user to press Ctrl+C
     loop {
         if cancel_flag.load(Ordering::SeqCst) {
             return Ok(());
