@@ -320,6 +320,7 @@ fn ring_bell() {
 
 struct TerminalRenderer {
     stdout: Stdout,
+    last_size: Option<(u16, u16)>,
 }
 
 impl TerminalRenderer {
@@ -327,7 +328,10 @@ impl TerminalRenderer {
         let mut stdout = stdout();
         stdout.execute(EnterAlternateScreen)?;
         stdout.execute(Hide)?;
-        Ok(Self { stdout })
+        Ok(Self {
+            stdout,
+            last_size: None,
+        })
     }
 
     fn render(
@@ -336,10 +340,17 @@ impl TerminalRenderer {
         background: Option<Color>,
     ) -> TerminalResult<()> {
         let (cols, rows) = terminal::size()?;
+        let current_size = (cols, rows);
         let width = cols.max(1) as usize;
         let mut writer = &self.stdout;
 
-        writer.execute(Clear(ClearType::All))?;
+        // Only clear if terminal was resized or first render
+        let needs_clear = self.last_size != Some(current_size);
+        if needs_clear {
+            writer.execute(Clear(ClearType::All))?;
+            self.last_size = Some(current_size);
+        }
+
         let blank_line = " ".repeat(width);
 
         for row in 0..rows {
