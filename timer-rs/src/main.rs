@@ -11,6 +11,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, ValueEnum};
 use crossterm::{
     ExecutableCommand,
+    QueueableCommand,
     cursor::{Hide, MoveTo, Show},
     style::{Color, ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
@@ -360,17 +361,17 @@ impl TerminalRenderer {
         // Only clear if terminal was resized or first render
         let needs_clear = self.last_size != Some(current_size);
         if needs_clear {
-            writer.execute(Clear(ClearType::All))?;
-            self.last_size = Some(current_size);
+            writer.queue(Clear(ClearType::All))?;
         }
+        self.last_size = Some(current_size);
 
         let blank_line = " ".repeat(width);
 
         for row in 0..rows {
-            writer.execute(MoveTo(0, row))?;
-            writer.execute(ResetColor)?;
+            writer.queue(MoveTo(0, row))?;
+            writer.queue(ResetColor)?;
             if let Some(bg) = background {
-                writer.execute(SetBackgroundColor(bg))?;
+                writer.queue(SetBackgroundColor(bg))?;
             }
             write!(writer, "{blank_line}")?;
         }
@@ -385,13 +386,13 @@ impl TerminalRenderer {
             let right_padding = width.saturating_sub(left_padding + text_width);
             let target_row = start_row + idx as u16;
 
-            writer.execute(MoveTo(0, target_row))?;
-            writer.execute(ResetColor)?;
+            writer.queue(MoveTo(0, target_row))?;
+            writer.queue(ResetColor)?;
             if let Some(bg) = background {
-                writer.execute(SetBackgroundColor(bg))?;
+                writer.queue(SetBackgroundColor(bg))?;
             }
             if let Some(fg) = color {
-                writer.execute(SetForegroundColor(*fg))?;
+                writer.queue(SetForegroundColor(*fg))?;
             }
 
             write!(
@@ -403,7 +404,7 @@ impl TerminalRenderer {
             )?;
         }
 
-        writer.execute(ResetColor)?;
+        writer.queue(ResetColor)?;
         writer.flush()?;
         Ok(())
     }
