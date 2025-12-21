@@ -33,6 +33,7 @@ timerr <duration> [OPTIONS]
 - `--no-bell` – suppress the repeating terminal bell after the timer ends.
 - `-f, --font <classic|hashy|solid>` – `solid` (the default) renders chunky block characters, `classic` uses those lovely standard characters on your keyboard, and `hashy` uses `#`-based glyphs. You can also set `TIMER_FONT` to switch fonts globally.
 - `--color <colour>` – choose the initial countdown colour. Accepted names: `pink`, `purple`, `green`, `blue`, `yellow`, `white`, `black`, or any `#RRGGBB` hex value (default `#785c9c`).
+- `--auto-end` - automatically kill the timer when it ends. Useful for chaining commands or as a visible "sleep" timer.
 
 The timer changes colours as it counts down (green → yellow → red), uses the terminal’s alternate screen buffer for clean rendering, and beeps every 10 seconds after completion until interrupted (`Ctrl+C`).
 
