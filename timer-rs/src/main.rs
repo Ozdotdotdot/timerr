@@ -473,6 +473,10 @@ fn build_stopwatch_display_with_scroll(
     scroll_offset: usize,
     visible_laps: usize,
 ) -> Vec<(String, Option<Color>)> {
+    let terminal_width = terminal::size()
+        .map(|(cols, _)| cols as usize)
+        .unwrap_or(80)
+        .max(1);
     let stopwatch_text = format_stopwatch_time(elapsed);
     let mut lines: Vec<(String, Option<Color>)> = font
         .render(&stopwatch_text)
@@ -486,9 +490,18 @@ fn build_stopwatch_display_with_scroll(
     let start = cmp::min(scroll_offset, newest_first.len());
     let end = cmp::min(start + visible_laps, newest_first.len());
     for lap in newest_first[start..end].iter() {
+        lines.push((format_lap_line(lap, terminal_width), Some(Color::White)));
+    }
+
+    if !newest_first.is_empty() && newest_first.len() > visible_laps {
+        let visible_start = start + 1;
+        let visible_end = end;
         lines.push((
-            format!("Lap {}  {}", lap.number, format_stopwatch_time(lap.elapsed)),
-            Some(Color::White),
+            format!(
+                "Laps {visible_start}-{visible_end} of {} (newest first, Up/Down to scroll)",
+                newest_first.len()
+            ),
+            Some(Color::DarkGrey),
         ));
     }
 
@@ -504,6 +517,24 @@ fn build_stopwatch_display_with_scroll(
     lines.push((controls.to_string(), Some(Color::DarkGrey)));
 
     lines
+}
+
+fn format_lap_line(lap: &LapEntry, width: usize) -> String {
+    let full = format!("Lap {}  {}", lap.number, format_stopwatch_time(lap.elapsed));
+    if UnicodeWidthStr::width(full.as_str()) <= width {
+        return full;
+    }
+
+    let compact = format!("L{} {}", lap.number, format_stopwatch_time(lap.elapsed));
+    if UnicodeWidthStr::width(compact.as_str()) <= width {
+        return compact;
+    }
+
+    format!(
+        "L{} {}",
+        lap.number,
+        format_compact_stopwatch_time(lap.elapsed)
+    )
 }
 
 fn print_stopwatch_summary(summary: &StopwatchSummary) {
@@ -538,6 +569,22 @@ fn format_stopwatch_time(duration: Duration) -> String {
     let millis = total_millis % 1_000;
 
     format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}")
+}
+
+fn format_compact_stopwatch_time(duration: Duration) -> String {
+    let total_millis = duration.as_millis() as u64;
+    let hours = total_millis / 3_600_000;
+    let minutes = (total_millis / 60_000) % 60;
+    let seconds = (total_millis / 1_000) % 60;
+    let millis = total_millis % 1_000;
+
+    if hours > 0 {
+        format!("{hours}h{minutes:02}m{seconds:02}.{millis:03}s")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds:02}.{millis:03}s")
+    } else {
+        format!("{seconds}.{millis:03}s")
+    }
 }
 
 fn pick_color(ratio_remaining: f64, base_color: Color) -> Color {
