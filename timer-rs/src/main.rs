@@ -10,11 +10,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, ValueEnum};
 use crossterm::{
-    ExecutableCommand,
-    QueueableCommand,
+    ExecutableCommand, QueueableCommand,
     cursor::{Hide, MoveTo, Show},
+    event::{self, Event, KeyCode, KeyEventKind},
     style::{Color, ResetColor, SetBackgroundColor, SetForegroundColor},
-    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+        enable_raw_mode,
+    },
 };
 use regex::Regex;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -89,7 +92,8 @@ fn parse_color(value: &str) -> std::result::Result<Color, String> {
 #[command(
     name = "timerr",
     version,
-    about = "A terminal countdown timer with ASCII art output."
+    about = "A terminal countdown timer with ASCII art output.",
+    after_help = "Commands:\n  stopwatch    Run interactive stopwatch mode"
 )]
 struct Cli {
     /// Duration of the timer. Syntax: __h__m__s (e.g. 25m, 1h15m, 5m30s)
@@ -127,6 +131,29 @@ struct Cli {
     auto_end: bool,
 }
 
+#[derive(Debug, Parser)]
+#[command(name = "timerr stopwatch", disable_help_subcommand = true)]
+struct StopwatchCli {
+    /// Select the ASCII art font
+    #[arg(
+        short = 'f',
+        long = "font",
+        value_enum,
+        env = "TIMER_FONT",
+        default_value_t = FontChoice::Solid
+    )]
+    font: FontChoice,
+
+    /// Stopwatch text colour
+    #[arg(
+        long = "color",
+        default_value = "#785c9c",
+        value_parser = parse_color,
+        help = "Colour for stopwatch text (pink|purple|green|blue|yellow|white|black|#RRGGBB)"
+    )]
+    color: Color,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum FontChoice {
     Classic,
@@ -145,16 +172,6 @@ impl FontChoice {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let duration_input = cli
-        .duration
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("Please specify a timer duration (try `timer 25m`)."))?;
-
-    let duration = parse_duration(duration_input)?;
-
     let cancel_flag = Arc::new(AtomicBool::new(false));
     {
         let handler_flag = Arc::clone(&cancel_flag);
@@ -164,8 +181,35 @@ fn main() -> Result<()> {
         .context("failed to install Ctrl+C handler")?;
     }
 
-    let mut terminal = TerminalRenderer::new().context("failed to prepare the terminal")?;
+    let raw_args = std::env::args().collect::<Vec<_>>();
+    if raw_args.get(1).map(String::as_str) == Some("stopwatch") {
+        let stopwatch = StopwatchCli::parse_from(
+            std::iter::once(raw_args[0].clone())
+                .chain(raw_args.into_iter().skip(2))
+                .collect::<Vec<_>>(),
+        );
+        let mut terminal = TerminalRenderer::new().context("failed to prepare the terminal")?;
+        let summary = run_stopwatch(
+            &mut terminal,
+            stopwatch.font.definition(),
+            stopwatch.color,
+            cancel_flag,
+        )?;
+        drop(terminal);
+        print_stopwatch_summary(&summary);
+        return Ok(());
+    }
 
+    let cli = Cli::parse();
+    let duration_input = cli
+        .duration
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("Please specify a timer duration (try `timerr 25m`)."))?;
+    let duration = parse_duration(duration_input)?;
+
+    let mut terminal = TerminalRenderer::new().context("failed to prepare the terminal")?;
     run_timer(
         &mut terminal,
         duration,
@@ -286,12 +330,214 @@ fn run_timer(
     }
 }
 
+#[derive(Debug, Clone)]
+struct LapEntry {
+    number: usize,
+    elapsed: Duration,
+}
+
+#[derive(Debug)]
+struct StopwatchSummary {
+    elapsed: Duration,
+    laps: Vec<LapEntry>,
+}
+
+fn run_stopwatch(
+    terminal: &mut TerminalRenderer,
+    font: &FontDefinition,
+    timer_color: Color,
+    cancel_flag: Arc<AtomicBool>,
+) -> Result<StopwatchSummary> {
+    let started_at = Instant::now();
+    let mut paused_at: Option<Instant> = None;
+    let mut paused_total = Duration::ZERO;
+    let mut laps: Vec<LapEntry> = Vec::new();
+    let mut scroll_offset = 0usize;
+    let mut last_displayed_millis = u128::MAX;
+    let mut dirty = true;
+
+    loop {
+        if cancel_flag.load(Ordering::SeqCst) {
+            break;
+        }
+
+        while event::poll(Duration::from_millis(1)).context("failed to poll terminal events")? {
+            let key_event = match event::read().context("failed to read terminal event")? {
+                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => key_event,
+                _ => continue,
+            };
+
+            match key_event.code {
+                KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    let elapsed = current_stopwatch_elapsed(started_at, paused_total, paused_at);
+                    return Ok(StopwatchSummary { elapsed, laps });
+                }
+                KeyCode::Esc => {
+                    if let Some(pause_start) = paused_at.take() {
+                        paused_total += Instant::now().saturating_duration_since(pause_start);
+                    } else {
+                        paused_at = Some(Instant::now());
+                    }
+                    dirty = true;
+                }
+                KeyCode::Char(' ') => {
+                    if paused_at.is_none() {
+                        let elapsed =
+                            current_stopwatch_elapsed(started_at, paused_total, paused_at);
+                        laps.push(LapEntry {
+                            number: laps.len() + 1,
+                            elapsed,
+                        });
+                        scroll_offset = 0;
+                        dirty = true;
+                    }
+                }
+                KeyCode::Down => {
+                    scroll_offset = scroll_offset.saturating_add(1);
+                    dirty = true;
+                }
+                KeyCode::PageDown => {
+                    scroll_offset = scroll_offset.saturating_add(5);
+                    dirty = true;
+                }
+                KeyCode::Up => {
+                    scroll_offset = scroll_offset.saturating_sub(1);
+                    dirty = true;
+                }
+                KeyCode::PageUp => {
+                    scroll_offset = scroll_offset.saturating_sub(5);
+                    dirty = true;
+                }
+                KeyCode::Home => {
+                    scroll_offset = 0;
+                    dirty = true;
+                }
+                _ => {}
+            }
+        }
+
+        let elapsed = current_stopwatch_elapsed(started_at, paused_total, paused_at);
+        let elapsed_millis = elapsed.as_millis();
+        if paused_at.is_some() && elapsed_millis == last_displayed_millis && !dirty {
+            thread::sleep(Duration::from_millis(30));
+            continue;
+        }
+
+        let available_laps = visible_lap_count(font.height, !laps.is_empty());
+        let max_offset = laps.len().saturating_sub(available_laps);
+        scroll_offset = cmp::min(scroll_offset, max_offset);
+        let lines = build_stopwatch_display_with_scroll(
+            font,
+            elapsed,
+            timer_color,
+            &laps,
+            paused_at.is_some(),
+            scroll_offset,
+            available_laps,
+        );
+        terminal.render(&lines, None)?;
+        last_displayed_millis = elapsed_millis;
+        dirty = false;
+
+        thread::sleep(Duration::from_millis(16));
+    }
+
+    let elapsed = current_stopwatch_elapsed(started_at, paused_total, paused_at);
+    Ok(StopwatchSummary { elapsed, laps })
+}
+
+fn current_stopwatch_elapsed(
+    started_at: Instant,
+    paused_total: Duration,
+    paused_at: Option<Instant>,
+) -> Duration {
+    let now = paused_at.unwrap_or_else(Instant::now);
+    now.saturating_duration_since(started_at)
+        .saturating_sub(paused_total)
+}
+
+fn visible_lap_count(font_height: usize, has_laps: bool) -> usize {
+    let rows = terminal::size()
+        .map(|(_, rows)| rows as usize)
+        .unwrap_or(24);
+    let fixed_lines = font_height + 2 + usize::from(has_laps); // blank line + controls + optional spacer before controls
+    rows.saturating_sub(fixed_lines)
+}
+
+fn build_stopwatch_display_with_scroll(
+    font: &FontDefinition,
+    elapsed: Duration,
+    timer_color: Color,
+    laps: &[LapEntry],
+    paused: bool,
+    scroll_offset: usize,
+    visible_laps: usize,
+) -> Vec<(String, Option<Color>)> {
+    let stopwatch_text = format_stopwatch_time(elapsed);
+    let mut lines: Vec<(String, Option<Color>)> = font
+        .render(&stopwatch_text)
+        .into_iter()
+        .map(|line| (line, Some(timer_color)))
+        .collect();
+
+    lines.push((String::new(), None));
+
+    let newest_first = laps.iter().rev().collect::<Vec<_>>();
+    let start = cmp::min(scroll_offset, newest_first.len());
+    let end = cmp::min(start + visible_laps, newest_first.len());
+    for lap in newest_first[start..end].iter() {
+        lines.push((
+            format!("Lap {}  {}", lap.number, format_stopwatch_time(lap.elapsed)),
+            Some(Color::White),
+        ));
+    }
+
+    if !newest_first.is_empty() {
+        lines.push((String::new(), None));
+    }
+
+    let controls = if paused {
+        "SPACE: lap   ESC: resume   q: quit"
+    } else {
+        "SPACE: lap   ESC: pause   q: quit"
+    };
+    lines.push((controls.to_string(), Some(Color::DarkGrey)));
+
+    lines
+}
+
+fn print_stopwatch_summary(summary: &StopwatchSummary) {
+    println!(
+        "Stopwatch elapsed: {}",
+        format_stopwatch_time(summary.elapsed)
+    );
+    if summary.laps.is_empty() {
+        println!("No laps recorded.");
+        return;
+    }
+
+    println!("Lap summary:");
+    for lap in &summary.laps {
+        println!("Lap {}  {}", lap.number, format_stopwatch_time(lap.elapsed));
+    }
+}
+
 fn format_time(total_seconds: u64) -> String {
     let hours = total_seconds / 3600;
     let minutes = (total_seconds / 60) % 60;
     let seconds = total_seconds % 60;
 
     format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+fn format_stopwatch_time(duration: Duration) -> String {
+    let total_millis = duration.as_millis() as u64;
+    let hours = total_millis / 3_600_000;
+    let minutes = (total_millis / 60_000) % 60;
+    let seconds = (total_millis / 1_000) % 60;
+    let millis = total_millis % 1_000;
+
+    format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}")
 }
 
 fn pick_color(ratio_remaining: f64, base_color: Color) -> Color {
@@ -340,6 +586,7 @@ struct TerminalRenderer {
 impl TerminalRenderer {
     fn new() -> TerminalResult<Self> {
         let mut stdout = stdout();
+        enable_raw_mode()?;
         stdout.execute(EnterAlternateScreen)?;
         stdout.execute(Hide)?;
         Ok(Self {
@@ -415,6 +662,7 @@ impl Drop for TerminalRenderer {
         let _ = self.stdout.execute(ResetColor);
         let _ = self.stdout.execute(Show);
         let _ = self.stdout.execute(LeaveAlternateScreen);
+        let _ = disable_raw_mode();
     }
 }
 
@@ -506,7 +754,7 @@ const CLASSIC_FONT: FontDefinition = FontDefinition {
     glyphs: &CLASSIC_GLYPHS,
 };
 
-const CLASSIC_GLYPHS: [Glyph; 12] = [
+const CLASSIC_GLYPHS: [Glyph; 13] = [
     Glyph {
         ch: '0',
         lines: &[
@@ -568,6 +816,10 @@ const CLASSIC_GLYPHS: [Glyph; 12] = [
         lines: &["   ", " _ ", "(_)", " _ ", "(_)", "   "],
     },
     Glyph {
+        ch: '.',
+        lines: &["   ", "   ", "   ", "   ", " _ ", "(_)"],
+    },
+    Glyph {
         ch: ' ',
         lines: &["  ", "  ", "  ", "  ", "  ", "  "],
     },
@@ -580,7 +832,7 @@ const HASHY_FONT: FontDefinition = FontDefinition {
     glyphs: &HASHY_GLYPHS,
 };
 
-const HASHY_GLYPHS: [Glyph; 12] = [
+const HASHY_GLYPHS: [Glyph; 13] = [
     Glyph {
         ch: '0',
         lines: &[
@@ -646,6 +898,10 @@ const HASHY_GLYPHS: [Glyph; 12] = [
         lines: &["    ", " ## ", " ## ", "    ", " ## ", " ## "],
     },
     Glyph {
+        ch: '.',
+        lines: &["    ", "    ", "    ", "    ", " ## ", " ## "],
+    },
+    Glyph {
         ch: ' ',
         lines: &["  ", "  ", "  ", "  ", "  ", "  "],
     },
@@ -658,7 +914,7 @@ const SOLID_FONT: FontDefinition = FontDefinition {
     glyphs: &SOLID_GLYPHS,
 };
 
-const SOLID_GLYPHS: [Glyph; 12] = [
+const SOLID_GLYPHS: [Glyph; 13] = [
     Glyph {
         ch: '0',
         lines: &[
@@ -782,6 +1038,10 @@ const SOLID_GLYPHS: [Glyph; 12] = [
     Glyph {
         ch: ':',
         lines: &["   ", " ██", " ██", "   ", " ██", " ██", "   "],
+    },
+    Glyph {
+        ch: '.',
+        lines: &["   ", "   ", "   ", "   ", "   ", " ██", " ██"],
     },
     Glyph {
         ch: ' ',

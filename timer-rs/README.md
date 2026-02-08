@@ -24,6 +24,7 @@ Cargo installs binaries into `~/.cargo/bin`. If your shell can't find `timerr`, 
 
 ```bash
 timerr <duration> [OPTIONS]
+timerr stopwatch [OPTIONS]
 ```
 
 - Duration syntax matches the Python tool: `__h__m__s`, e.g. `25m`, `1h30m`, `5m30s`.
@@ -31,8 +32,24 @@ timerr <duration> [OPTIONS]
 - `--no-bell` – suppress the repeating terminal bell after the timer ends.
 - `-f, --font <classic|hashy|solid>` – `solid` (the default) renders chunky block characters, `classic` uses those lovely standard characters on your keyboard, and `hashy` uses `#`-based glyphs. You can also set `TIMER_FONT` to switch fonts globally.
 - `--color <colour>` – choose the initial countdown colour. Accepted names: `pink`, `purple`, `green`, `blue`, `yellow`, `white`, `black`, or any `#RRGGBB` hex value (default `#785c9c`).
+- `stopwatch` - run an interactive stopwatch with millisecond precision and lap recording.
 
 The timer changes colours as it counts down (green → yellow → red), uses the terminal’s alternate screen buffer for clean rendering, and beeps every 10 seconds after completion until interrupted (`Ctrl+C`).
+
+### Stopwatch mode
+
+Run:
+
+```bash
+timerr stopwatch
+```
+
+- Format: `HH:MM:SS.mmm`
+- `SPACE` records a lap (`Lap 1`, `Lap 2`, ...)
+- `ESC` toggles pause/resume (laps are ignored while paused)
+- `q` exits stopwatch mode
+- Laps are shown in the same TUI below the timer (newest first), and support keyboard scrolling (`Up`/`Down`, `PageUp`/`PageDown`, `Home`)
+- On exit, a final elapsed time and lap summary are printed in the normal terminal
 
 ## Examples
 
@@ -42,4 +59,7 @@ timerr 25m -m "Review pull requests" --font hashy
 
 # 1 hour, silence the bell
 timerr 1h --no-bell
+
+# Stopwatch mode
+timerr stopwatch
 ```
