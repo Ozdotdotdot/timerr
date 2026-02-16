@@ -743,11 +743,6 @@ fn build_timer_display(
 
     lines.push((String::new(), None));
 
-    if paused {
-        lines.push(("PAUSED".to_string(), Some(Color::Yellow)));
-        lines.push((String::new(), None));
-    }
-
     let controls = if paused {
         if restart_pending {
             "SPACE: resume   r: press again to restart   q: quit"
@@ -758,6 +753,11 @@ fn build_timer_display(
         "SPACE: pause   q: quit"
     };
     lines.push((controls.to_string(), Some(Color::DarkGrey)));
+    lines.push((String::new(), None));
+    lines.push((
+        if paused { "PAUSED".to_string() } else { String::new() },
+        if paused { Some(Color::Yellow) } else { None },
+    ));
 
     lines
 }
