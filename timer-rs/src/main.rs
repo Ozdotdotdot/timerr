@@ -270,41 +270,128 @@ fn run_timer(
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<()> {
     let total_secs = cmp::max(duration.as_secs(), 1);
-    let start = Instant::now();
+    let mut start = Instant::now();
     let mut last_rendered = None;
+    let mut paused_at: Option<Instant> = None;
+    let mut paused_total = Duration::ZERO;
+    let mut frozen_color: Option<Color> = None;
+    let mut restart_pending: Option<Instant> = None;
+    let mut dirty = true;
 
     loop {
         if cancel_flag.load(Ordering::SeqCst) {
             return Ok(());
         }
 
-        let elapsed = start.elapsed();
+        // Drain all pending events
+        while event::poll(Duration::from_millis(1))
+            .context("failed to poll terminal events")?
+        {
+            match event::read().context("failed to read terminal event")? {
+                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                    match key_event.code {
+                        KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(()),
+                        KeyCode::Char(' ') => {
+                            if let Some(pause_start) = paused_at.take() {
+                                // Resume
+                                paused_total +=
+                                    Instant::now().saturating_duration_since(pause_start);
+                                frozen_color = None;
+                                restart_pending = None;
+                            } else {
+                                // Pause: snapshot the current color
+                                let remaining = current_timer_remaining(
+                                    start, duration, paused_total, None,
+                                );
+                                let ratio = remaining.as_secs() as f64 / total_secs as f64;
+                                frozen_color = Some(pick_color(ratio, color));
+                                paused_at = Some(Instant::now());
+                            }
+                            dirty = true;
+                        }
+                        KeyCode::Char('r') | KeyCode::Char('R') => {
+                            if paused_at.is_some() {
+                                if let Some(first_press) = restart_pending {
+                                    if first_press.elapsed() < Duration::from_secs(2) {
+                                        // Confirmed restart
+                                        start = Instant::now();
+                                        paused_at = None;
+                                        paused_total = Duration::ZERO;
+                                        frozen_color = None;
+                                        restart_pending = None;
+                                        last_rendered = None;
+                                    } else {
+                                        restart_pending = Some(Instant::now());
+                                    }
+                                } else {
+                                    restart_pending = Some(Instant::now());
+                                }
+                                dirty = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Event::Resize(_, _) => {
+                    dirty = true;
+                }
+                _ => {}
+            }
+        }
 
-        if elapsed >= duration {
+        // Expire restart confirmation after 2 seconds
+        if let Some(first_press) = restart_pending {
+            if first_press.elapsed() >= Duration::from_secs(2) {
+                restart_pending = None;
+                dirty = true;
+            }
+        }
+
+        let remaining = current_timer_remaining(start, duration, paused_total, paused_at);
+
+        if remaining.is_zero() {
             break;
         }
 
-        let remaining = duration - elapsed;
         let remaining_secs = remaining.as_secs();
 
-        if last_rendered == Some(remaining_secs) {
-            thread::sleep(Duration::from_millis(100));
+        // Skip render if nothing changed
+        if last_rendered == Some(remaining_secs) && !dirty {
+            if paused_at.is_some() {
+                thread::sleep(Duration::from_millis(30));
+            } else {
+                thread::sleep(Duration::from_millis(16));
+            }
             continue;
         }
 
         last_rendered = Some(remaining_secs);
         let time_string = format_time(remaining_secs);
         let ratio = remaining_secs as f64 / total_secs as f64;
-        let timer_color = pick_color(ratio, color);
+        let timer_color = if paused_at.is_some() {
+            frozen_color.unwrap_or_else(|| pick_color(ratio, color))
+        } else {
+            pick_color(ratio, color)
+        };
 
-        let lines = build_display(font, &time_string, message, timer_color);
+        let lines = build_timer_display(
+            font,
+            &time_string,
+            message,
+            timer_color,
+            paused_at.is_some(),
+            restart_pending.is_some(),
+        );
         terminal.render(&lines, None)?;
+        dirty = false;
 
-        thread::sleep(Duration::from_millis(150));
+        thread::sleep(Duration::from_millis(16));
     }
 
     // Final state
-    let final_lines = build_display(font, "00:00:00", message, Color::White);
+    let mut final_lines = build_display(font, "00:00:00", message, Color::White);
+    final_lines.push((String::new(), None));
+    final_lines.push(("q: quit".to_string(), Some(Color::DarkGrey)));
     terminal.render(&final_lines, Some(Color::DarkRed))?;
 
     if cancel_flag.load(Ordering::SeqCst) {
@@ -317,16 +404,28 @@ fn run_timer(
 
     // If auto-end is enabled, exit immediately after showing final state
     if auto_end {
-        thread::sleep(Duration::from_millis(500)); // Brief pause to show final state
+        thread::sleep(Duration::from_millis(500));
         return Ok(());
     }
 
-    // Otherwise, wait for user to press Ctrl+C
+    // Wait for user to press q or Ctrl+C
     loop {
         if cancel_flag.load(Ordering::SeqCst) {
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(100));
+        while event::poll(Duration::from_millis(1))
+            .context("failed to poll terminal events")?
+        {
+            if let Event::Key(key_event) = event::read().context("failed to read terminal event")? {
+                if key_event.kind == KeyEventKind::Press {
+                    match key_event.code {
+                        KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -454,6 +553,17 @@ fn current_stopwatch_elapsed(
     let now = paused_at.unwrap_or_else(Instant::now);
     now.saturating_duration_since(started_at)
         .saturating_sub(paused_total)
+}
+
+fn current_timer_remaining(
+    start: Instant,
+    duration: Duration,
+    paused_total: Duration,
+    paused_at: Option<Instant>,
+) -> Duration {
+    let now = paused_at.unwrap_or_else(Instant::now);
+    let elapsed = now.saturating_duration_since(start).saturating_sub(paused_total);
+    duration.saturating_sub(elapsed)
 }
 
 fn visible_lap_count(font_height: usize, has_laps: bool) -> usize {
@@ -616,6 +726,38 @@ fn build_display(
             lines.push((trimmed.to_string(), Some(Color::Cyan)));
         }
     }
+
+    lines
+}
+
+fn build_timer_display(
+    font: &FontDefinition,
+    time_text: &str,
+    message: &str,
+    timer_color: Color,
+    paused: bool,
+    restart_pending: bool,
+) -> Vec<(String, Option<Color>)> {
+    let display_color = if paused { Color::DarkGrey } else { timer_color };
+    let mut lines = build_display(font, time_text, message, display_color);
+
+    lines.push((String::new(), None));
+
+    if paused {
+        lines.push(("PAUSED".to_string(), Some(Color::Yellow)));
+        lines.push((String::new(), None));
+    }
+
+    let controls = if paused {
+        if restart_pending {
+            "SPACE: resume   r: press again to restart   q: quit"
+        } else {
+            "SPACE: resume   r: restart   q: quit"
+        }
+    } else {
+        "SPACE: pause   q: quit"
+    };
+    lines.push((controls.to_string(), Some(Color::DarkGrey)));
 
     lines
 }
