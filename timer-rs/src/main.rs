@@ -382,7 +382,7 @@ fn run_timer(
             paused_at.is_some(),
             restart_pending.is_some(),
         );
-        terminal.render(&lines, None)?;
+        terminal.render(&lines, None, None)?;
         dirty = false;
 
         thread::sleep(Duration::from_millis(16));
@@ -392,7 +392,7 @@ fn run_timer(
     let mut final_lines = build_display(font, "00:00:00", message, Color::White);
     final_lines.push((String::new(), None));
     final_lines.push(("q: quit".to_string(), Some(Color::DarkGrey)));
-    terminal.render(&final_lines, Some(Color::DarkRed))?;
+    terminal.render(&final_lines, Some(Color::DarkRed), None)?;
 
     if cancel_flag.load(Ordering::SeqCst) {
         return Ok(());
@@ -534,7 +534,7 @@ fn run_stopwatch(
             scroll_offset,
             available_laps,
         );
-        terminal.render(&lines, None)?;
+        terminal.render(&lines, None, None)?;
         last_displayed_millis = elapsed_millis;
         dirty = false;
 
@@ -759,7 +759,17 @@ fn build_timer_display(
         if paused { Some(Color::Yellow) } else { None },
     ));
 
-    lines
+    // Keep the digit block centered by balancing all supporting rows below
+    // with equivalent spacer rows above.
+    let supporting_rows = lines.len().saturating_sub(font.height);
+    if supporting_rows == 0 {
+        return lines;
+    }
+
+    let mut balanced = Vec::with_capacity(lines.len() + supporting_rows);
+    balanced.extend((0..supporting_rows).map(|_| (String::new(), None)));
+    balanced.extend(lines);
+    balanced
 }
 
 fn ring_bell() {
@@ -770,6 +780,23 @@ fn ring_bell() {
 struct TerminalRenderer {
     stdout: Stdout,
     last_size: Option<(u16, u16)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VerticalAnchor {
+    offset: usize,
+    height: usize,
+}
+
+fn compute_start_row(rows: u16, total_lines: usize, anchor: Option<VerticalAnchor>) -> u16 {
+    let rows_usize = rows as usize;
+    let default_start = rows_usize.saturating_sub(total_lines) / 2;
+    let Some(anchor) = anchor else {
+        return default_start as u16;
+    };
+
+    let desired_anchor_top = rows_usize.saturating_sub(anchor.height) / 2;
+    desired_anchor_top.saturating_sub(anchor.offset) as u16
 }
 
 impl TerminalRenderer {
@@ -788,6 +815,7 @@ impl TerminalRenderer {
         &mut self,
         lines: &[(String, Option<Color>)],
         background: Option<Color>,
+        anchor: Option<VerticalAnchor>,
     ) -> TerminalResult<()> {
         let (cols, rows) = terminal::size()?;
         let current_size = (cols, rows);
@@ -812,8 +840,8 @@ impl TerminalRenderer {
             write!(writer, "{blank_line}")?;
         }
 
-        let total_lines = lines.len() as u16;
-        let start_row = rows.saturating_sub(total_lines) / 2;
+        let total_lines = lines.len();
+        let start_row = compute_start_row(rows, total_lines, anchor);
 
         for (idx, (line, color)) in lines.iter().enumerate() {
             let truncated = truncate_to_width(line, width);
@@ -821,6 +849,9 @@ impl TerminalRenderer {
             let left_padding = width.saturating_sub(text_width) / 2;
             let right_padding = width.saturating_sub(left_padding + text_width);
             let target_row = start_row + idx as u16;
+            if target_row >= rows {
+                continue;
+            }
 
             writer.queue(MoveTo(0, target_row))?;
             writer.queue(ResetColor)?;
@@ -843,6 +874,39 @@ impl TerminalRenderer {
         writer.queue(ResetColor)?;
         writer.flush()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VerticalAnchor, compute_start_row};
+
+    #[test]
+    fn compute_start_row_without_anchor_matches_legacy_centering() {
+        assert_eq!(compute_start_row(40, 10, None), 15);
+        assert_eq!(compute_start_row(25, 9, None), 8);
+    }
+
+    #[test]
+    fn compute_start_row_with_anchor_centers_digit_block() {
+        // 40 rows tall terminal, 12 rendered lines total.
+        // Digits are first 6 lines and should be centered:
+        // desired digit top = (40 - 6) / 2 = 17.
+        let anchor = VerticalAnchor {
+            offset: 0,
+            height: 6,
+        };
+        assert_eq!(compute_start_row(40, 12, Some(anchor)), 17);
+    }
+
+    #[test]
+    fn compute_start_row_with_anchor_keeps_digits_centered_when_content_overflows() {
+        // Even with oversized content, keep the anchored block centered.
+        let anchor = VerticalAnchor {
+            offset: 0,
+            height: 6,
+        };
+        assert_eq!(compute_start_row(8, 20, Some(anchor)), 1);
     }
 }
 
