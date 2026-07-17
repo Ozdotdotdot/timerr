@@ -34,7 +34,7 @@ timerr stopwatch [OPTIONS]
 - `--color <colour>` – choose the initial countdown colour. Accepted names: `pink`, `purple`, `green`, `blue`, `yellow`, `white`, `black`, or any `#RRGGBB` hex value (default `#785c9c`).
 - `stopwatch` - run an interactive stopwatch with millisecond precision and lap recording.
 
-The timer changes colours as it counts down (green → yellow → red), uses the terminal’s alternate screen buffer for clean rendering, and beeps every 10 seconds after completion until interrupted (`Ctrl+C`).
+The timer changes colours as it counts down (green → yellow → red), uses retained cell-level updates in the terminal’s alternate screen buffer for flicker-free rendering, and beeps every 10 seconds after completion until interrupted (`Ctrl+C`).
 
 ### Stopwatch mode
 

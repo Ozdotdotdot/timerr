@@ -1,5 +1,5 @@
 use std::cmp;
-use std::io::{Stdout, Write, stdout};
+use std::io::{Write, stdout};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -11,13 +11,20 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, ValueEnum};
 use crossterm::{
     ExecutableCommand, QueueableCommand,
-    cursor::{Hide, MoveTo, Show},
+    cursor::{Hide, Show},
     event::{self, Event, KeyCode, KeyEventKind},
-    style::{Color, ResetColor, SetBackgroundColor, SetForegroundColor},
+    style::ResetColor,
     terminal::{
-        self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
-        enable_raw_mode,
+        self, BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen,
+        LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     },
+};
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Style},
 };
 use regex::Regex;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -35,38 +42,14 @@ fn parse_color(value: &str) -> std::result::Result<Color, String> {
 
     let normalized = raw.to_ascii_lowercase();
     let named = match normalized.as_str() {
-        "pink" => Some(Color::Rgb {
-            r: 0xcc,
-            g: 0x3d,
-            b: 0xd4,
-        }),
-        "purple" => Some(Color::Rgb {
-            r: 0xa6,
-            g: 0x6e,
-            b: 0xeb,
-        }),
-        "green" => Some(Color::Rgb {
-            r: 0x24,
-            g: 0x8c,
-            b: 0x5f,
-        }),
-        "blue" => Some(Color::Rgb {
-            r: 0x06,
-            g: 0x0e,
-            b: 0xa1,
-        }),
-        "yellow" => Some(Color::Rgb {
-            r: 0xd9,
-            g: 0xed,
-            b: 0x77,
-        }),
+        "pink" => Some(Color::Rgb(0xcc, 0x3d, 0xd4)),
+        "purple" => Some(Color::Rgb(0xa6, 0x6e, 0xeb)),
+        "green" => Some(Color::Rgb(0x24, 0x8c, 0x5f)),
+        "blue" => Some(Color::Rgb(0x06, 0x0e, 0xa1)),
+        "yellow" => Some(Color::Rgb(0xd9, 0xed, 0x77)),
         "white" => Some(Color::White),
         "black" => Some(Color::Black),
-        "default" => Some(Color::Rgb {
-            r: 0x78,
-            g: 0x5c,
-            b: 0x9c,
-        }),
+        "default" => Some(Color::Rgb(0x78, 0x5c, 0x9c)),
         _ => None,
     };
 
@@ -85,7 +68,7 @@ fn parse_color(value: &str) -> std::result::Result<Color, String> {
     let g = u8::from_str_radix(&hex[2..4], 16).map_err(|_| "invalid green component")?;
     let b = u8::from_str_radix(&hex[4..6], 16).map_err(|_| "invalid blue component")?;
 
-    Ok(Color::Rgb { r, g, b })
+    Ok(Color::Rgb(r, g, b))
 }
 
 #[derive(Debug, Parser)]
@@ -212,12 +195,14 @@ fn main() -> Result<()> {
     let mut terminal = TerminalRenderer::new().context("failed to prepare the terminal")?;
     run_timer(
         &mut terminal,
-        duration,
-        cli.message.trim(),
-        cli.no_bell,
-        cli.font.definition(),
-        cli.color,
-        cli.auto_end,
+        TimerConfig {
+            duration,
+            message: cli.message.trim(),
+            no_bell: cli.no_bell,
+            font: cli.font.definition(),
+            color: cli.color,
+            auto_end: cli.auto_end,
+        },
         cancel_flag,
     )?;
 
@@ -237,10 +222,7 @@ fn parse_duration(input: &str) -> Result<Duration> {
     let parse_piece = |idx| -> Result<u64> {
         Ok(captures
             .get(idx)
-            .map(|m| {
-                m.as_str()
-                    .trim_end_matches(|c| c == 'h' || c == 'm' || c == 's')
-            })
+            .map(|m| m.as_str().trim_end_matches(['h', 'm', 's']))
             .filter(|s| !s.is_empty())
             .map(|s| s.parse::<u64>())
             .transpose()?
@@ -259,16 +241,28 @@ fn parse_duration(input: &str) -> Result<Duration> {
     Ok(Duration::from_secs(total_seconds))
 }
 
-fn run_timer(
-    terminal: &mut TerminalRenderer,
+struct TimerConfig<'a> {
     duration: Duration,
-    message: &str,
+    message: &'a str,
     no_bell: bool,
-    font: &FontDefinition,
+    font: &'a FontDefinition,
     color: Color,
     auto_end: bool,
+}
+
+fn run_timer(
+    terminal: &mut TerminalRenderer,
+    config: TimerConfig<'_>,
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<()> {
+    let TimerConfig {
+        duration,
+        message,
+        no_bell,
+        font,
+        color,
+        auto_end,
+    } = config;
     let total_secs = cmp::max(duration.as_secs(), 1);
     let mut start = Instant::now();
     let mut last_rendered = None;
@@ -284,9 +278,7 @@ fn run_timer(
         }
 
         // Drain all pending events
-        while event::poll(Duration::from_millis(1))
-            .context("failed to poll terminal events")?
-        {
+        while event::poll(Duration::from_millis(1)).context("failed to poll terminal events")? {
             match event::read().context("failed to read terminal event")? {
                 Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
                     match key_event.code {
@@ -300,10 +292,9 @@ fn run_timer(
                                 restart_pending = None;
                             } else {
                                 // Pause: snapshot the current color
-                                let remaining = current_timer_remaining(
-                                    start, duration, paused_total, None,
-                                );
-                                let ratio = remaining.as_secs() as f64 / total_secs as f64;
+                                let remaining =
+                                    current_timer_remaining(start, duration, paused_total, None);
+                                let ratio = display_seconds(remaining) as f64 / total_secs as f64;
                                 frozen_color = Some(pick_color(ratio, color));
                                 paused_at = Some(Instant::now());
                             }
@@ -340,11 +331,11 @@ fn run_timer(
         }
 
         // Expire restart confirmation after 2 seconds
-        if let Some(first_press) = restart_pending {
-            if first_press.elapsed() >= Duration::from_secs(2) {
-                restart_pending = None;
-                dirty = true;
-            }
+        if let Some(first_press) = restart_pending
+            && first_press.elapsed() >= Duration::from_secs(2)
+        {
+            restart_pending = None;
+            dirty = true;
         }
 
         let remaining = current_timer_remaining(start, duration, paused_total, paused_at);
@@ -353,7 +344,7 @@ fn run_timer(
             break;
         }
 
-        let remaining_secs = remaining.as_secs();
+        let remaining_secs = display_seconds(remaining);
 
         // Skip render if nothing changed
         if last_rendered == Some(remaining_secs) && !dirty {
@@ -382,7 +373,14 @@ fn run_timer(
             paused_at.is_some(),
             restart_pending.is_some(),
         );
-        terminal.render(&lines, None, None)?;
+        terminal.render(
+            &lines,
+            None,
+            Some(VerticalAnchor {
+                offset: 0,
+                height: font.height,
+            }),
+        )?;
         dirty = false;
 
         thread::sleep(Duration::from_millis(16));
@@ -391,8 +389,15 @@ fn run_timer(
     // Final state
     let mut final_lines = build_display(font, "00:00:00", message, Color::White);
     final_lines.push((String::new(), None));
-    final_lines.push(("q: quit".to_string(), Some(Color::DarkGrey)));
-    terminal.render(&final_lines, Some(Color::DarkRed), None)?;
+    final_lines.push(("q: quit".to_string(), Some(Color::DarkGray)));
+    terminal.render(
+        &final_lines,
+        Some(Color::Red),
+        Some(VerticalAnchor {
+            offset: 0,
+            height: font.height,
+        }),
+    )?;
 
     if cancel_flag.load(Ordering::SeqCst) {
         return Ok(());
@@ -413,15 +418,13 @@ fn run_timer(
         if cancel_flag.load(Ordering::SeqCst) {
             return Ok(());
         }
-        while event::poll(Duration::from_millis(1))
-            .context("failed to poll terminal events")?
-        {
-            if let Event::Key(key_event) = event::read().context("failed to read terminal event")? {
-                if key_event.kind == KeyEventKind::Press {
-                    match key_event.code {
-                        KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(()),
-                        _ => {}
-                    }
+        while event::poll(Duration::from_millis(1)).context("failed to poll terminal events")? {
+            if let Event::Key(key_event) = event::read().context("failed to read terminal event")?
+                && key_event.kind == KeyEventKind::Press
+            {
+                match key_event.code {
+                    KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(()),
+                    _ => {}
                 }
             }
         }
@@ -522,7 +525,7 @@ fn run_stopwatch(
             continue;
         }
 
-        let available_laps = visible_lap_count(font.height, !laps.is_empty());
+        let available_laps = visible_lap_count(font.height, laps.len());
         let max_offset = laps.len().saturating_sub(available_laps);
         scroll_offset = cmp::min(scroll_offset, max_offset);
         let lines = build_stopwatch_display_with_scroll(
@@ -534,7 +537,14 @@ fn run_stopwatch(
             scroll_offset,
             available_laps,
         );
-        terminal.render(&lines, None, None)?;
+        terminal.render(
+            &lines,
+            None,
+            Some(VerticalAnchor {
+                offset: 0,
+                height: font.height,
+            }),
+        )?;
         last_displayed_millis = elapsed_millis;
         dirty = false;
 
@@ -562,16 +572,30 @@ fn current_timer_remaining(
     paused_at: Option<Instant>,
 ) -> Duration {
     let now = paused_at.unwrap_or_else(Instant::now);
-    let elapsed = now.saturating_duration_since(start).saturating_sub(paused_total);
+    let elapsed = now
+        .saturating_duration_since(start)
+        .saturating_sub(paused_total);
     duration.saturating_sub(elapsed)
 }
 
-fn visible_lap_count(font_height: usize, has_laps: bool) -> usize {
+fn visible_lap_count(font_height: usize, lap_count: usize) -> usize {
     let rows = terminal::size()
         .map(|(_, rows)| rows as usize)
         .unwrap_or(24);
-    let fixed_lines = font_height + 2 + usize::from(has_laps); // blank line + controls + optional spacer before controls
-    rows.saturating_sub(fixed_lines)
+    visible_lap_count_for_rows(rows, font_height, lap_count)
+}
+
+fn visible_lap_count_for_rows(rows: usize, font_height: usize, lap_count: usize) -> usize {
+    let digit_top = rows.saturating_sub(font_height) / 2;
+    let rows_below_digits = rows.saturating_sub(digit_top.saturating_add(font_height));
+    let fixed_rows = 2 + usize::from(lap_count > 0); // timer spacer, controls, lap spacer
+    let available = rows_below_digits.saturating_sub(fixed_rows);
+
+    if lap_count > available {
+        available.saturating_sub(1) // scrolling status
+    } else {
+        available
+    }
 }
 
 fn build_stopwatch_display_with_scroll(
@@ -604,15 +628,16 @@ fn build_stopwatch_display_with_scroll(
     }
 
     if !newest_first.is_empty() && newest_first.len() > visible_laps {
-        let visible_start = start + 1;
-        let visible_end = end;
-        lines.push((
+        let status = if end > start {
+            let visible_start = start + 1;
             format!(
-                "Laps {visible_start}-{visible_end} of {} (newest first, Up/Down to scroll)",
+                "Laps {visible_start}-{end} of {} (newest first, Up/Down to scroll)",
                 newest_first.len()
-            ),
-            Some(Color::DarkGrey),
-        ));
+            )
+        } else {
+            format!("{} laps (enlarge terminal to view)", newest_first.len())
+        };
+        lines.push((status, Some(Color::DarkGray)));
     }
 
     if !newest_first.is_empty() {
@@ -624,7 +649,7 @@ fn build_stopwatch_display_with_scroll(
     } else {
         "SPACE: lap   ESC: pause   q: quit"
     };
-    lines.push((controls.to_string(), Some(Color::DarkGrey)));
+    lines.push((controls.to_string(), Some(Color::DarkGray)));
 
     lines
 }
@@ -669,6 +694,12 @@ fn format_time(total_seconds: u64) -> String {
     let seconds = total_seconds % 60;
 
     format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+fn display_seconds(duration: Duration) -> u64 {
+    duration
+        .as_secs()
+        .saturating_add(u64::from(duration.subsec_nanos() != 0))
 }
 
 fn format_stopwatch_time(duration: Duration) -> String {
@@ -738,7 +769,7 @@ fn build_timer_display(
     paused: bool,
     restart_pending: bool,
 ) -> Vec<(String, Option<Color>)> {
-    let display_color = if paused { Color::DarkGrey } else { timer_color };
+    let display_color = if paused { Color::DarkGray } else { timer_color };
     let mut lines = build_display(font, time_text, message, display_color);
 
     lines.push((String::new(), None));
@@ -752,24 +783,18 @@ fn build_timer_display(
     } else {
         "SPACE: pause   q: quit"
     };
-    lines.push((controls.to_string(), Some(Color::DarkGrey)));
+    lines.push((controls.to_string(), Some(Color::DarkGray)));
     lines.push((String::new(), None));
     lines.push((
-        if paused { "PAUSED".to_string() } else { String::new() },
+        if paused {
+            "PAUSED".to_string()
+        } else {
+            String::new()
+        },
         if paused { Some(Color::Yellow) } else { None },
     ));
 
-    // Keep the digit block centered by balancing all supporting rows below
-    // with equivalent spacer rows above.
-    let supporting_rows = lines.len().saturating_sub(font.height);
-    if supporting_rows == 0 {
-        return lines;
-    }
-
-    let mut balanced = Vec::with_capacity(lines.len() + supporting_rows);
-    balanced.extend((0..supporting_rows).map(|_| (String::new(), None)));
-    balanced.extend(lines);
-    balanced
+    lines
 }
 
 fn ring_bell() {
@@ -778,8 +803,8 @@ fn ring_bell() {
 }
 
 struct TerminalRenderer {
-    stdout: Stdout,
-    last_size: Option<(u16, u16)>,
+    terminal: Terminal<CrosstermBackend<std::io::Stdout>>,
+    synchronized_update_active: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -801,14 +826,31 @@ fn compute_start_row(rows: u16, total_lines: usize, anchor: Option<VerticalAncho
 
 impl TerminalRenderer {
     fn new() -> TerminalResult<Self> {
-        let mut stdout = stdout();
+        let mut output = stdout();
         enable_raw_mode()?;
-        stdout.execute(EnterAlternateScreen)?;
-        stdout.execute(Hide)?;
-        Ok(Self {
-            stdout,
-            last_size: None,
-        })
+        if let Err(error) = output.execute(EnterAlternateScreen) {
+            let _ = disable_raw_mode();
+            return Err(error);
+        }
+        if let Err(error) = output.execute(Hide) {
+            let _ = output.execute(LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+            return Err(error);
+        }
+
+        match Terminal::new(CrosstermBackend::new(output)) {
+            Ok(terminal) => Ok(Self {
+                terminal,
+                synchronized_update_active: false,
+            }),
+            Err(error) => {
+                let mut stdout = stdout();
+                let _ = stdout.execute(Show);
+                let _ = stdout.execute(LeaveAlternateScreen);
+                let _ = disable_raw_mode();
+                Err(error)
+            }
+        }
     }
 
     fn render(
@@ -817,69 +859,79 @@ impl TerminalRenderer {
         background: Option<Color>,
         anchor: Option<VerticalAnchor>,
     ) -> TerminalResult<()> {
-        let (cols, rows) = terminal::size()?;
-        let current_size = (cols, rows);
-        let width = cols.max(1) as usize;
-        let mut writer = &self.stdout;
-
-        // Only clear if terminal was resized or first render
-        let needs_clear = self.last_size != Some(current_size);
-        if needs_clear {
-            writer.queue(Clear(ClearType::All))?;
-        }
-        self.last_size = Some(current_size);
-
-        let blank_line = " ".repeat(width);
-
-        for row in 0..rows {
-            writer.queue(MoveTo(0, row))?;
-            writer.queue(ResetColor)?;
-            if let Some(bg) = background {
-                writer.queue(SetBackgroundColor(bg))?;
-            }
-            write!(writer, "{blank_line}")?;
+        self.terminal.autoresize()?;
+        self.terminal.backend_mut().queue(BeginSynchronizedUpdate)?;
+        self.synchronized_update_active = true;
+        let draw_result = self
+            .terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_frame(frame.buffer_mut(), area, lines, background, anchor);
+            })
+            .map(|_| ());
+        let end_result = self
+            .terminal
+            .backend_mut()
+            .execute(EndSynchronizedUpdate)
+            .map(|_| ());
+        if end_result.is_ok() {
+            self.synchronized_update_active = false;
         }
 
-        let total_lines = lines.len();
-        let start_row = compute_start_row(rows, total_lines, anchor);
+        draw_result.and(end_result)
+    }
+}
 
-        for (idx, (line, color)) in lines.iter().enumerate() {
-            let truncated = truncate_to_width(line, width);
-            let text_width = UnicodeWidthStr::width(truncated.as_str());
-            let left_padding = width.saturating_sub(text_width) / 2;
-            let right_padding = width.saturating_sub(left_padding + text_width);
-            let target_row = start_row + idx as u16;
-            if target_row >= rows {
-                continue;
-            }
+fn render_frame(
+    buffer: &mut Buffer,
+    area: Rect,
+    lines: &[(String, Option<Color>)],
+    background: Option<Color>,
+    anchor: Option<VerticalAnchor>,
+) {
+    if let Some(background) = background {
+        buffer.set_style(area, Style::default().bg(background));
+    }
 
-            writer.queue(MoveTo(0, target_row))?;
-            writer.queue(ResetColor)?;
-            if let Some(bg) = background {
-                writer.queue(SetBackgroundColor(bg))?;
-            }
-            if let Some(fg) = color {
-                writer.queue(SetForegroundColor(*fg))?;
-            }
-
-            write!(
-                writer,
-                "{}{}{}",
-                " ".repeat(left_padding),
-                truncated,
-                " ".repeat(right_padding)
-            )?;
+    let width = area.width.max(1) as usize;
+    let start_row = compute_start_row(area.height, lines.len(), anchor);
+    for (idx, (line, color)) in lines.iter().enumerate() {
+        let target_row = start_row.saturating_add(idx as u16);
+        if target_row >= area.height {
+            continue;
         }
 
-        writer.queue(ResetColor)?;
-        writer.flush()?;
-        Ok(())
+        let truncated = truncate_to_width(line, width);
+        let text_width = UnicodeWidthStr::width(truncated.as_str());
+        let left_padding = width.saturating_sub(text_width) / 2;
+        let mut style = Style::default();
+        if let Some(background) = background {
+            style = style.bg(background);
+        }
+        if let Some(color) = color {
+            style = style.fg(*color);
+        }
+        buffer.set_stringn(
+            area.x.saturating_add(left_padding as u16),
+            area.y.saturating_add(target_row),
+            truncated,
+            width.saturating_sub(left_padding),
+            style,
+        );
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::{VerticalAnchor, compute_start_row};
+    use std::time::Duration;
+
+    use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Rect, style::Color};
+
+    use super::{
+        VerticalAnchor, compute_start_row, display_seconds, render_frame,
+        visible_lap_count_for_rows,
+    };
 
     #[test]
     fn compute_start_row_without_anchor_matches_legacy_centering() {
@@ -908,13 +960,97 @@ mod tests {
         };
         assert_eq!(compute_start_row(8, 20, Some(anchor)), 1);
     }
+
+    #[test]
+    fn countdown_rounds_partial_seconds_up_for_display() {
+        assert_eq!(display_seconds(Duration::ZERO), 0);
+        assert_eq!(display_seconds(Duration::from_nanos(1)), 1);
+        assert_eq!(display_seconds(Duration::from_millis(999)), 1);
+        assert_eq!(display_seconds(Duration::from_millis(1_001)), 2);
+        assert_eq!(display_seconds(Duration::from_secs(5)), 5);
+    }
+
+    #[test]
+    fn lap_capacity_keeps_timer_and_controls_in_place() {
+        assert_eq!(visible_lap_count_for_rows(24, 6, 0), 7);
+        assert_eq!(visible_lap_count_for_rows(24, 6, 4), 6);
+        assert_eq!(visible_lap_count_for_rows(24, 6, 20), 5);
+        assert_eq!(visible_lap_count_for_rows(8, 6, 20), 0);
+    }
+
+    #[test]
+    fn render_frame_centers_text_using_display_width() {
+        let area = Rect::new(0, 0, 10, 3);
+        let mut buffer = Buffer::empty(area);
+        let lines = vec![("界界".to_string(), Some(Color::Cyan))];
+
+        render_frame(&mut buffer, area, &lines, None, None);
+
+        assert_eq!(buffer[(3, 1)].symbol(), "界");
+        assert_eq!(buffer[(5, 1)].symbol(), "界");
+        assert_eq!(buffer[(3, 1)].fg, Color::Cyan);
+    }
+
+    #[test]
+    fn render_frame_applies_background_to_the_entire_screen() {
+        let area = Rect::new(0, 0, 5, 3);
+        let mut buffer = Buffer::empty(area);
+        let lines = vec![("done".to_string(), Some(Color::White))];
+
+        render_frame(&mut buffer, area, &lines, Some(Color::Red), None);
+
+        for cell in &buffer.content {
+            assert_eq!(cell.bg, Color::Red);
+        }
+    }
+
+    #[test]
+    fn retained_frames_remove_content_that_disappears() {
+        let backend = TestBackend::new(12, 3);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_frame(
+                    frame.buffer_mut(),
+                    area,
+                    &[("long text".to_string(), Some(Color::White))],
+                    None,
+                    None,
+                );
+            })
+            .expect("first frame");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_frame(
+                    frame.buffer_mut(),
+                    area,
+                    &[("x".to_string(), Some(Color::White))],
+                    None,
+                    None,
+                );
+            })
+            .expect("second frame");
+
+        let rendered_row = (0..12)
+            .map(|x| terminal.backend().buffer()[(x, 1)].symbol())
+            .collect::<String>();
+        assert_eq!(rendered_row, "     x      ");
+    }
 }
 
 impl Drop for TerminalRenderer {
     fn drop(&mut self) {
-        let _ = self.stdout.execute(ResetColor);
-        let _ = self.stdout.execute(Show);
-        let _ = self.stdout.execute(LeaveAlternateScreen);
+        let synchronized_update_active = self.synchronized_update_active;
+        let backend = self.terminal.backend_mut();
+        if synchronized_update_active {
+            let _ = backend.execute(EndSynchronizedUpdate);
+        }
+        let _ = backend.execute(ResetColor);
+        let _ = backend.execute(Show);
+        let _ = backend.execute(LeaveAlternateScreen);
         let _ = disable_raw_mode();
     }
 }

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1] - 2026-07-17
+### Fixed
+- Replaced full-screen repainting with retained, cell-level rendering to eliminate flicker and substantially reduce terminal output.
+- Wrapped frame draws in synchronized terminal updates so supporting terminals display each update atomically.
+- Kept countdown and stopwatch digits vertically stable as controls, messages, and laps change.
+- Corrected countdown rounding so a timer displays its full starting duration.
+- Improved stopwatch lap layout and terminal cleanup during resize and error paths.
+
 ## [v1.0.1] - 2025-11-18
 ### Added
 - **Responsive Rendering**: Timer display now fully re-centers and redraws itself when the terminal window is resized, preventing ghosting or overlapping digits during rapid resize operations.
