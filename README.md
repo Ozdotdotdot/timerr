@@ -37,7 +37,7 @@ timerr stopwatch [OPTIONS]
 - `--auto-end` - automatically kill the timer when it ends. Useful for chaining commands or as a visible "sleep" timer.
 - `stopwatch` - run an interactive stopwatch with millisecond precision and lap recording.
 
-The timer changes colours as it counts down (green → yellow → red), uses the terminal’s alternate screen buffer for clean rendering, and beeps every 10 seconds after completion until interrupted (`Ctrl+C`).
+The timer changes colours as it counts down (green → yellow → red), uses retained cell-level updates in the terminal’s alternate screen buffer for flicker-free rendering, and beeps every 10 seconds after completion until interrupted (`Ctrl+C`).
 
 ### Stopwatch mode
 
